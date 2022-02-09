@@ -1,0 +1,345 @@
+---
+title: "CLSA PA and Sleep Analysis and Output"
+author: "RSF"
+date: "08/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1) Set-Up
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse,Hmisc, knitr, pander, broom, haven, rms, nlme,lspline, lavaan, semTools, tableone, ggpubr, ggplot2, openxlsx, expss)
+
+setwd("~/Desktop/Manuscripts/Ongoing Projects/CLSA - Sleep and PA")
+comp<-read.xlsx("Comprehensive_PA_Sleep_Processed.xlsx")#Processed Comprehensive Data (Complete Data) #26889 used same test language
+
+#Select participants: exclude cognitively impaired, no PA data, and no sleep data
+
+comp1<- subset(comp, Dementia.1==0 & Parkinsons.1==0 & SCI.1==0 & Stroke.1==0) #25830 without neurocognitive impairment
+
+comp2<-subset(comp1, !is.na(PASE_TOTAL)) #20976 have PASE data
+comp3<-subset(comp2, !is.na(SQ_Hours) & !is.na(SQ_Satisfaction) & !is.na(SQ_Latency_30min) & !is.na(SQ_Fragmentation) &
+                !is.na(SQ_DaytimeSleepy) & !is.na(SQ_Apnea)) #20307 have sleep data
+
+
+comp3$FAS_Total<-comp3$FAS_A_SCORE_COM + comp3$FAS_F_SCORE_COM + comp3$FAS_S_SCORE_COM
+
+
+comp3<- comp3[c(1:3,170:213,247:259,4:169,260,214:260)]
+```
+
+
+2) Cognitive Function Score
+
+```{r}
+#Unitary Factor
+Comp.Onefactor <- '
+
+Global.Cog=~MAT_Score + RVLT_Immediate_Score + RVLT_Delayed_Score + Animal_Fluency_Strict + FAS_Total + PMT_TMT_Total + Stroop_Colour_Time + Stroop_Word_Time +Choice_RT_avgRT'
+
+Onefit.comp <- cfa(Comp.Onefactor,data=comp3,missing="FIML")
+
+pander(fitmeasures(Onefit.comp,c("chisq", "df", "cfi", 
+                                 "tli","aic","bic","rmsea","rmsea.ci.lower",
+                                 "rmsea.ci.upper")))
+
+
+#Two Factor
+Comp.Twofactor <- '
+Memory=~RVLT_Immediate_Score + RVLT_Delayed_Score + PMT_TMT_Total
+
+EF=~MAT_Score + Animal_Fluency_Strict + FAS_Total + Stroop_Colour_Time + Stroop_Word_Time + Choice_RT_avgRT'
+
+Twofit.comp <- cfa(Comp.Twofactor,data=comp3,missing="FIML")
+
+pander(fitmeasures(Twofit.comp,c("chisq", "df", "cfi", 
+                                 "tli","aic","bic","rmsea","rmsea.ci.lower",
+                                 "rmsea.ci.upper")))
+
+#Three Factor
+Comp.Threefactor <- '
+Memory=~RVLT_Immediate_Score + RVLT_Delayed_Score + PMT_TMT_Total
+Verbal=~Animal_Fluency_Strict+ FAS_Total
+EF=~MAT_Score + Stroop_Colour_Time + Stroop_Word_Time +Choice_RT_avgRT'
+
+Threefit.comp <- cfa(Comp.Threefactor,data=comp3,missing="FIML")
+
+pander(fitmeasures(Threefit.comp,c("chisq", "df", "cfi", 
+                                   "tli","aic","bic","rmsea","rmsea.ci.lower",
+                                   "rmsea.ci.upper")))
+
+#Compare Models
+pander(anova(Twofit.comp,Onefit.comp))#Two Factor much better than 1
+pander(anova(Threefit.comp,Onefit.comp))#Three Factor much better than 1
+pander(anova(Threefit.comp,Twofit.comp))#Three Factor much better than 2
+
+
+#standardized solution for three-factor measurement model
+pander(standardizedsolution(Threefit.comp,ci=FALSE))
+
+#Final Model
+Comp.Final <- '
+Memory=~RVLT_Immediate_Score + RVLT_Delayed_Score 
+Verbal=~Animal_Fluency_Strict+ FAS_Total
+EF=~MAT_Score + Stroop_Colour_Time + Stroop_Word_Time + Choice_RT_avgRT'
+
+Finalfit.comp <- cfa(Comp.Final,data=comp3,missing="FIML")
+
+pander(fitmeasures(Finalfit.comp,c("chisq", "df", "cfi", 
+                                   "tli","aic","bic","rmsea","rmsea.ci.lower",
+                                   "rmsea.ci.upper")))
+
+pander(anova(Threefit.comp,Finalfit.comp))#Final better than full 3
+
+#standardized solution for final measurement model
+pander(standardizedsolution(Finalfit.comp,ci=FALSE))
+
+#Final model latent scores for each participant
+Latent_vars <- lavPredict(Finalfit.comp,append.data = FALSE)
+comp4<- comp3
+comp4$Memory<-Latent_vars[,1]
+comp4$Verbal<-Latent_vars[,2]
+comp4$EF<-Latent_vars[,3]
+```
+
+3) Descriptive Statistics
+
+```{r}
+dem_vars<-dput(names(comp4[c(3,2,4,11,20,31,6,50)]))
+sleep_PA_vars<-dput(names(comp4[c(261,48,228,229,230,233,236,249)]))
+Cog_vars<-dput(names(comp4[c(275:277)]))
+Table1_dem_vars<-CreateTableOne(vars=dem_vars, data=comp4)
+Table1_sleep_vars<-CreateTableOne(vars=sleep_PA_vars, data=comp4)
+Table1_Cog_vars<-CreateTableOne(vars=Cog_vars, data=comp4)
+
+#Demographic Variables#
+print(Table1_dem_vars,contDigits=2,missing=TRUE,quote=TRUE)
+#PA and Sleep Variables#
+print(Table1_sleep_vars,contDigits=2,missing=TRUE,quote=TRUE)
+#Cognitive Variable#
+print(Table1_Cog_vars,contDigits=2,missing=TRUE,quote=TRUE)
+```
+
+
+4) Regression Models: Age associated changes in PA and Sleep Duration
+
+```{r}
+#data preparation
+comp4$Age<-comp4$AGE_NMBR_COM
+comp4$Sex<-NA
+comp4$Sex[comp4$SEX_ASK_COM  == "M"]<-"Males"
+comp4$Sex[comp4$SEX_ASK_COM  == "F"]<-"Females"
+
+comp4$SQ_Satisfaction_1<-NA
+comp4$SQ_Satisfaction_1[comp4$SQ_Satisfaction=="Very Dissatisfied"]<-1
+comp4$SQ_Satisfaction_1[comp4$SQ_Satisfaction=="Dissatisfied"]<-2
+comp4$SQ_Satisfaction_1[comp4$SQ_Satisfaction=="Neutral"]<-3
+comp4$SQ_Satisfaction_1[comp4$SQ_Satisfaction=="Satisfied"]<-4
+comp4$SQ_Satisfaction_1[comp4$SQ_Satisfaction=="Very Satisfied"]<-5
+
+comp4$SQ_Fragmentation_1<-NA
+comp4$SQ_Fragmentation_1[comp4$SQ_Fragmentation=="6-7x/wk"]<-1
+comp4$SQ_Fragmentation_1[comp4$SQ_Fragmentation=="3-5x/wk"]<-2
+comp4$SQ_Fragmentation_1[comp4$SQ_Fragmentation=="1-2x/wk"]<-3
+comp4$SQ_Fragmentation_1[comp4$SQ_Fragmentation=="Less than 1x/wk"]<-4
+comp4$SQ_Fragmentation_1[comp4$SQ_Fragmentation=="Never"]<-5
+
+comp4$SQ_DaytimeSleepy_1<-NA
+comp4$SQ_DaytimeSleepy_1[comp4$SQ_DaytimeSleepy=="6-7x/wk"]<-1
+comp4$SQ_DaytimeSleepy_1[comp4$SQ_DaytimeSleepy=="3-5x/wk"]<-2
+comp4$SQ_DaytimeSleepy_1[comp4$SQ_DaytimeSleepy=="1-2x/wk"]<-3
+comp4$SQ_DaytimeSleepy_1[comp4$SQ_DaytimeSleepy=="Less than 1x/wk"]<-4
+comp4$SQ_DaytimeSleepy_1[comp4$SQ_DaytimeSleepy=="Never"]<-5
+
+comp4$SQ_Latency_30min_1<-NA
+comp4$SQ_Latency_30min_1[comp4$SQ_Latency_30min=="6-7x/wk"]<-1
+comp4$SQ_Latency_30min_1[comp4$SQ_Latency_30min=="3-5x/wk"]<-2
+comp4$SQ_Latency_30min_1[comp4$SQ_Latency_30min=="1-2x/wk"]<-3
+comp4$SQ_Latency_30min_1[comp4$SQ_Latency_30min=="Less than 1x/wk"]<-4
+comp4$SQ_Latency_30min_1[comp4$SQ_Latency_30min=="Never"]<-5
+
+comp4$SQ_OSA<-NA
+comp4$SQ_OSA[comp4$SQ_Apnea=="Yes"]<-1
+comp4$SQ_OSA[comp4$SQ_Apnea=="No"]<-0
+
+
+compfinal<- comp4[-c(30,49,51,56:59,262,61:227,264)]
+library(psych)
+
+ddist<-datadist(compfinal)
+options(datadist='ddist')
+library(expss)
+compfinal = apply_labels(compfinal,
+                         Education.1 = "Education",
+                         Avg_BMI = "BMI",
+                         Smoking_Status.1 = "Smoking Status",
+                         Lang_Used.1 = "Test Language",
+                         Income_Level = "Income",
+                         ADL.1 = "ADL",
+                         PASE_TOTAL = "PASE Score",
+                         SQ_Hours = "Sleep Duration Score"
+)
+
+#############PASE SCORE###################
+PASE_Spline <- ols(PASE_TOTAL~rcs(Age, 3)*Sex + Avg_BMI +  Education4 + 
+                     Income_Level + ADL + CESD_score,data=compfinal, x= TRUE, y = TRUE)
+
+PASE_Spline
+summary(PASE_Spline)#PASE score decreases with age (not significantly)
+ggplot(Predict(PASE_Spline,Age,Sex), adj.subtitle = FALSE) + theme_classic2(base_size=14) + scale_colour_grey() + ylab("Total PASE Score")
+pander(anova(PASE_Spline, tol= 1e-14))
+plot(anova(PASE_Spline, tol= 1e-14, vnames="labels"),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+
+
+
+#############Sleep Duration###################
+Duration_Spline <- ols(SQ_Hours~rcs(Age, 3)*Sex + Avg_BMI + Education4 + 
+                         Income_Level + ADL + CESD_score,data=compfinal, x= TRUE, y = TRUE)
+
+Duration_Spline
+summary(Duration_Spline)#Sleep duration increases with age
+ggplot(Predict(Duration_Spline,Age,Sex), adj.subtitle = FALSE) + theme_classic2(base_size=14) + scale_colour_hue() + geom_line(size=1) + ylab("Sleep Duration 
+(hours/night)")
+pander(anova(Duration_Spline))
+plot(anova(Duration_Spline,vnames="labels"),what="proportion chisq", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+```
+
+
+5) Regression Models: Does PA moderate age-associated cognitive function?
+
+```{r}
+compfinal2<- compfinal%>%
+  mutate(
+    agebin=cut(Age, breaks=seq(from=45, to=86, by=5),right=FALSE, labels=FALSE),
+  )%>%
+  
+  group_by(agebin,Sex)%>%
+  mutate(
+    PASE.norm = scale(PASE_TOTAL),
+    Duration.norm = scale(SQ_Hours),
+  )%>%
+  ungroup()
+
+ddist<-datadist(compfinal2)
+options(datadist='ddist')
+library(expss)
+
+compfinal2 = apply_labels(compfinal2,
+                          PASE.norm = "PASE Total Score",
+                          Duration.norm = "Sleep Duration Score",
+                          Quality1.norm = "Sleep Quality Score",
+                          Quality2.norm = "Sleep Quality Score 2"
+                          
+)
+
+#############PASE SCORE###################
+#Memory
+PASE_Memory <- ols(Memory~rcs(Age, 3)*Sex*rcs(PASE.norm, 3) + 
+                     Avg_BMI + Education4 + 
+                     Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+PASE_Memory
+ggplot(Predict(PASE_Memory,Age,PASE.norm=quantile(compfinal2$PASE.norm,na.rm=TRUE,c(.25,.75)), Sex), adj.subtitle = FALSE, linetype = PASE.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="PASE Total Score",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000"))
+pander(anova(PASE_Memory, tol=1e-14))
+plot(anova(PASE_Memory,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+
+
+
+#Executive Function
+PASE_EF <- ols(EF~rcs(Age, 3)*Sex*rcs(PASE.norm, 3) + 
+                 Avg_BMI + Education4 + 
+                 Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+
+
+PASE_EF
+ggplot(Predict(PASE_EF,Age,PASE.norm=quantile(compfinal2$PASE.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = PASE.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="PASE Total Score",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000")) + ylab("Executive Function")
+pander(anova(PASE_EF, tol=1e-14))
+plot(anova(PASE_EF,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+
+
+
+#Verbal Fluency
+PASE_VF <- ols(Verbal~rcs(Age, 3)*Sex*rcs(PASE.norm, 3) + 
+                 Avg_BMI + Education4 + 
+                 Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+PASE_VF
+ggplot(Predict(PASE_VF,Age,PASE.norm=quantile(compfinal2$PASE.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = PASE.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="PASE Total Score",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#666666", "#000000")) + ylab("Verbal Fluency")
+pander(anova(PASE_VF, tol=1e-14))
+plot(anova(PASE_VF,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+```
+
+
+6) Regression Models: Does sleep duration moderate age-associated cognitive function?
+
+```{r}
+#Memory
+Duration_Memory <- ols(Memory~rcs(Age, 3)*Sex*rcs(Duration.norm, 3) + 
+                         Avg_BMI + Education4 + 
+                         Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+Duration_Memory
+ggplot(Predict(Duration_Memory,Age,Duration.norm=quantile(compfinal2$Duration.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = Duration.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="Sleep Duration",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000"))
+pander(anova(Duration_Memory, tol=1e-14))
+plot(anova(Duration_Memory,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+
+
+
+#Executive Function
+Duration_EF <- ols(EF~rcs(Age, 3)*Sex*rcs(Duration.norm, 3) + 
+                     Avg_BMI + Education4 + 
+                     Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+Duration_EF
+ggplot(Predict(Duration_EF,Age,Duration.norm=quantile(compfinal2$Duration.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = Duration.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="Sleep Duration",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000")) + ylab("Executive Function")
+pander(anova(Duration_EF, tol=1e-14))
+plot(anova(Duration_EF,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+
+
+
+#Verbal Fluency
+Duration_Verbal <- ols(Verbal~rcs(Age, 3)*Sex*rcs(Duration.norm,3) + 
+                         Avg_BMI + Education4 + 
+                         Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2)
+
+
+Duration_Verbal
+ggplot(Predict(Duration_Verbal,Age,Duration.norm=quantile(compfinal2$Duration.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = Duration.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="Sleep Duration",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000")) + ylab("Verbal Fluency")
+pander(anova(Duration_Verbal, tol=1e-14))
+plot(anova(Duration_Verbal,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+```
+
+7) Regression Models: Does PA predict age-associated variability in sleep duration?
+
+```{r}
+PASE_Duration <- ols(SQ_Hours~rcs(Age,3)*Sex*rcs(PASE.norm, 3) + 
+                       Avg_BMI + Education4 + 
+                       Income_Level + ADL + Lang_Used + CESD_score, data=compfinal2, x= TRUE, y = TRUE)
+
+
+PASE_Duration
+ggplot(Predict(PASE_Duration,Age,PASE.norm=quantile(compfinal2$PASE.norm,na.rm=TRUE,c(.25,.75)),Sex), adj.subtitle = FALSE, linetype = PASE.norm) + theme_classic(base_size=14) + 
+  scale_colour_manual(name="PASE Score",labels=c("25th %tile","75th %tile"),
+                      values=c("#CCCCCC", "#000000")) + ylab("Age Standardized Sleep Duration")
+pander(anova(PASE_Duration, tol=1e-14))
+plot(anova(PASE_Duration,vnames="labels", tol=1e-14),what="partial R2", xlim=c(0,.8), margin=c('partial R2', 'P'), cex = .9)
+```
+
